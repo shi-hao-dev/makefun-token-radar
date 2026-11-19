@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Launch Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <div class="mark">◉</div>
+    <div>
+      <h1>Token Launch Radar</h1>
+      <p class="sub">Pre-token protocols, ranked by implied value — model <span id="model-ver">radar-2</span></p>
+    </div>
+  </div>
+  <div class="meta" id="meta-line">Loading snapshot…</div>
+</header>
+
+<main>
+  <section class="how card">
+    <h2>How the value is worked out</h2>
+    <p>Every protocol on the board records no token. Its implied value is its TVL times a
+    multiple, times a growth factor, times a maturity factor, times a chain factor:</p>
+    <p class="formula">implied = TVL × multiple × (1 + clamp(7d change, −50%, 100%) × 0.5) × (0.6 + min(age, 1095d) / 1095 × 0.4) × (1 + 0.02 × min(chains − 1, 5))</p>
+    <p>The multiple is not a flat number: it is the median market-cap-to-TVL ratio of the
+    live-token protocols in the same category, computed from this snapshot (see
+    <button class="linklike" data-tab="live">Live token comparables</button>). Categories
+    with fewer than 3 live tokens use the all-category median. Nothing is ranked by name —
+    the same function scores every row. The board covers all 40 watchlist protocols plus
+    158 more pre-token protocols below the floor that pass the same exclusions.</p>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="board" role="tab">Board</button>
+    <button class="tab" data-tab="live" role="tab">Live token comparables</button>
+    <button class="tab" data-tab="model" role="tab">Model sandbox</button>
+  </nav>
+
+  <section id="tab-board" class="tabpanel">
+    <div class="controls card">
+      <label>Search <input id="q" type="search" placeholder="protocol name or slug…" autocomplete="off"></label>
+      <label>Category <select id="f-cat"><option value="">All categories</option></select></label>
+      <label>Chain <select id="f-chain"><option value="">All chains</option></select></label>
+      <label>Min TVL <select id="f-tvl">
+        <option value="0" selected>Any</option>
+        <option value="50000000">$50M+</option>
+        <option value="100000000">$100M+</option>
+        <option value="250000000">$250M+</option>
+        <option value="500000000">$500M+</option>
+      </select></label>
+      <label>Sort <select id="f-sort">
+        <option value="implied">Implied value</option>
+        <option value="tvl">TVL</option>
+        <option value="growth">7-day growth</option>
+        <option value="age">Age (oldest first)</option>
+      </select></label>
+      <label class="check"><input id="f-watch" type="checkbox"> Watchlist only</label>
+      <span class="count" id="count"></span>
+    </div>
+    <div class="table-wrap card">
+      <table id="board">
+        <thead><tr>
+          <th>#</th><th>Protocol</th><th>Category</th><th>Chains</th>
+          <th class="num">TVL</th><th class="num">7d</th><th class="num">Age</th><th class="num">Implied value</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <p class="hint">Click a row for its detail view: the value breakdown and the farm plan.</p>
+    </div>
+    <div id="detail" class="detail card" hidden></div>
+  </section>
+
+  <section id="tab-live" class="tabpanel" hidden>
+    <div class="card">
+      <h2>Live token comparables</h2>
+      <p>These protocols already have a token. Their market-cap-to-TVL ratio is the evidence
+      behind each category's multiple: the model takes the median ratio per category, not a
+      number anyone chose. Ratios above 1 mean the market values the token above the TVL it
+      secures; below 1, below it.</p>
+      <div class="table-wrap">
+        <table id="live-table">
+          <thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">MCap / TVL</th></tr></thead>
+          <tbody id="live-rows"></tbody>
+        </table>
+      </div>
+      <h3>Category multiples used</h3>
+      <div class="table-wrap">
+        <table id="mult-table">
+          <thead><tr><th>Category</th><th class="num">Live tokens (n)</th><th class="num">Multiple</th></tr></thead>
+          <tbody id="mult-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-model" class="tabpanel" hidden>
+    <div class="card">
+      <h2>Model sandbox</h2>
+      <p>Move a constant and the board re-ranks from the same snapshot figures. The defaults
+      are the model's own: growth weight 0.5, maturity floor 0.6, multiple scale 1.0.</p>
+      <div class="sliders">
+        <label>Growth weight <span id="v-growth">0.50</span><input id="s-growth" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+        <label>Maturity floor <span id="v-mat">0.60</span><input id="s-mat" type="range" min="0.4" max="0.8" step="0.05" value="0.6"></label>
+        <label>Multiple scale <span id="v-mult">1.00</span><input id="s-mult" type="range" min="0.5" max="2" step="0.1" value="1"></label>
+        <button id="reset-model" type="button">Reset to defaults</button>
+      </div>
+      <p class="note">Top 5 under current constants:</p>
+      <ol id="sandbox-top" class="top5"></ol>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Data: DefiLlama protocols snapshot, <span id="as-of"></span>. The snapshot records no
+  token for the protocols on the board — it does not prove any of them has none, and it
+  carries no score, yield or airdrop flag; the ranking and the farm plans are this
+  entry's own work. Nothing here is financial advice.</p>
+</footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
