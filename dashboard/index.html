@@ -12,24 +12,46 @@
     <div class="mark">◉</div>
     <div>
       <h1>Token Launch Radar</h1>
-      <p class="sub">Pre-token protocols, ranked by implied value — model <span id="model-ver">radar-2</span></p>
+      <p class="sub">Pre-token protocols, ranked by implied value — model <span id="model-ver">radar-3</span></p>
     </div>
   </div>
   <div class="meta" id="meta-line">Loading snapshot…</div>
 </header>
 
 <main>
+  <section class="kpi card" id="kpi-strip">
+    <div class="kpi-box"><b id="kpi-total">758</b><span>protocols in the snapshot — all accounted for</span></div>
+    <div class="kpi-box"><b id="kpi-board">198</b><span>pre-token on the board</span></div>
+    <div class="kpi-box"><b id="kpi-live">144</b><span>live, token + market cap recorded</span></div>
+    <div class="kpi-box"><b id="kpi-nocap">272</b><span>token recorded, no market cap</span></div>
+    <div class="kpi-box"><b id="kpi-excl">144</b><span>pre-token excluded (bridge / staking / wrapped / versioned / exchange)</span></div>
+  </section>
+
   <section class="how card">
     <h2>How the value is worked out</h2>
-    <p>Every protocol on the board records no token. Its implied value is its TVL times a
-    multiple, times a growth factor, times a maturity factor, times a chain factor:</p>
-    <p class="formula">implied = TVL × multiple × (1 + clamp(7d change, −50%, 100%) × 0.5) × (0.6 + min(age, 1095d) / 1095 × 0.4) × (1 + 0.02 × min(chains − 1, 5))</p>
-    <p>The multiple is not a flat number: it is the median market-cap-to-TVL ratio of the
-    live-token protocols in the same category, computed from this snapshot (see
-    <button class="linklike" data-tab="live">Live token comparables</button>). Categories
-    with fewer than 3 live tokens use the all-category median. Nothing is ranked by name —
-    the same function scores every row. The board covers all 40 watchlist protocols plus
-    158 more pre-token protocols below the floor that pass the same exclusions.</p>
+    <p>Every protocol on the board records no token. Its implied value is not a multiple
+    anyone chose: it is a least-squares fit on the 128 live-token protocols in this
+    snapshot, re-fitted from the snapshot's own figures every time the page is built:</p>
+    <p class="formula">ln(mcap) = <span id="f-b0">…</span> + <span id="f-b1">…</span> × ln(TVL) + <span id="f-b2">…</span> × growth + <span id="f-b3">…</span> × age_years<br>
+    implied = exp(ln(mcap)), rounded to a whole dollar, at least $1</p>
+    <p>growth is the 7-day TVL change clamped to −50%…+100% (unreported counts as 0);
+    age_years is the days from first listing to the snapshot date over 365 (unknown
+    counts as 1 year). Fit quality: R² = <span id="f-r2">…</span> on log market cap,
+    n = <span id="f-n">128</span> live tokens. The board covers all 40 watchlist protocols
+    plus 158 more pre-token protocols below the floor that pass the same exclusions —
+    the whole eligible universe, not a capped top-N.</p>
+  </section>
+
+  <section class="valid card">
+    <h2>Validation — the fit, checked against the old median-multiple model</h2>
+    <p>Both models are scored on the same held-out protocols, on the log scale (lower is
+    better). The fitted model wins every split, so it is the one the board uses.</p>
+    <div class="table-wrap">
+      <table id="valid-table">
+        <thead><tr><th>Split</th><th class="num">Held-out (n)</th><th class="num">Fitted RMSE</th><th class="num">Baseline RMSE</th><th class="num">Fitted wins by</th></tr></thead>
+        <tbody id="valid-rows"></tbody>
+      </table>
+    </div>
   </section>
 
   <nav class="tabs" role="tablist">
@@ -67,7 +89,7 @@
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
-      <p class="hint">Click a row for its detail view: the value breakdown and the farm plan.</p>
+      <p class="hint">Click a row for its detail view: the fitted value breakdown and the farm plan.</p>
     </div>
     <div id="detail" class="detail card" hidden></div>
   </section>
@@ -75,17 +97,22 @@
   <section id="tab-live" class="tabpanel" hidden>
     <div class="card">
       <h2>Live token comparables</h2>
-      <p>These protocols already have a token. Their market-cap-to-TVL ratio is the evidence
-      behind each category's multiple: the model takes the median ratio per category, not a
-      number anyone chose. Ratios above 1 mean the market values the token above the TVL it
-      secures; below 1, below it.</p>
+      <p>These 144 protocols already have a token and a recorded market cap. The 128 with
+      a positive market cap and TVL are the training set the fitted model learns from;
+      the other 16 record a market cap of zero or less and are shown for completeness.
+      Ratios above 1 mean the market values the token above the TVL it secures; below 1,
+      below it.</p>
       <div class="table-wrap">
         <table id="live-table">
           <thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">MCap / TVL</th></tr></thead>
           <tbody id="live-rows"></tbody>
         </table>
       </div>
-      <h3>Category multiples used</h3>
+      <h3>Category multiples of the old baseline model</h3>
+      <p>The validation baseline values a protocol at its category's median
+      market-cap-to-TVL ratio (categories with fewer than 3 live tokens use the
+      all-category median), times growth, maturity and chain factors. It loses to the
+      fitted model on every split above — which is why the board no longer uses it.</p>
       <div class="table-wrap">
         <table id="mult-table">
           <thead><tr><th>Category</th><th class="num">Live tokens (n)</th><th class="num">Multiple</th></tr></thead>
@@ -98,15 +125,17 @@
   <section id="tab-model" class="tabpanel" hidden>
     <div class="card">
       <h2>Model sandbox</h2>
-      <p>Move a constant and the board re-ranks from the same snapshot figures. The defaults
-      are the model's own: growth weight 0.5, maturity floor 0.6, multiple scale 1.0.</p>
+      <p>Move a fitted coefficient and the board re-ranks from the same snapshot figures.
+      The defaults are the model's own fit: intercept <span id="d-b0">…</span>, ln(TVL)
+      <span id="d-b1">…</span>, growth <span id="d-b2">…</span>, age <span id="d-b3">…</span>.</p>
       <div class="sliders">
-        <label>Growth weight <span id="v-growth">0.50</span><input id="s-growth" type="range" min="0" max="1" step="0.05" value="0.5"></label>
-        <label>Maturity floor <span id="v-mat">0.60</span><input id="s-mat" type="range" min="0.4" max="0.8" step="0.05" value="0.6"></label>
-        <label>Multiple scale <span id="v-mult">1.00</span><input id="s-mult" type="range" min="0.5" max="2" step="0.1" value="1"></label>
-        <button id="reset-model" type="button">Reset to defaults</button>
+        <label>ln(TVL) slope <span id="v-b1">…</span><input id="s-b1" type="range" min="0" max="1" step="0.001" value="0.527"></label>
+        <label>Growth coefficient <span id="v-b2">…</span><input id="s-b2" type="range" min="-0.1" max="0.1" step="0.001" value="-0.038"></label>
+        <label>Age coefficient <span id="v-b3">…</span><input id="s-b3" type="range" min="-0.3" max="0.3" step="0.001" value="-0.053"></label>
+        <label>Intercept shift <span id="v-b0">0.00</span><input id="s-b0" type="range" min="-1" max="1" step="0.05" value="0"></label>
+        <button id="reset-model" type="button">Reset to fitted values</button>
       </div>
-      <p class="note">Top 5 under current constants:</p>
+      <p class="note">Top 5 under current coefficients:</p>
       <ol id="sandbox-top" class="top5"></ol>
     </div>
   </section>

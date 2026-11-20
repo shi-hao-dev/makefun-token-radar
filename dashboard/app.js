@@ -7,6 +7,8 @@
 
   var rows = R.rows;
   var watchlist = new Set(R.watchlist || []);
+  var V = R.validation || {};
+  var B = V.coefficients || [0, 0, 0, 0];
   var $ = function (id) { return document.getElementById(id); };
 
   function usd(n) {
@@ -29,11 +31,45 @@
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
+  function coef(x) { return (x >= 0 ? '+' : '') + x.toFixed(3); }
 
   $('model-ver').textContent = R.version;
   $('as-of').textContent = R.as_of;
   $('meta-line').textContent = R.rows.length + ' protocols · snapshot ' + R.as_of +
     ' · floor $' + (R.floor_usd / 1e6) + 'M · ' + R.rows.filter(function (r) { return watchlist.has(r.slug); }).length + ' watchlist';
+
+  // KPI strip: the whole snapshot accounted for, counted at build time.
+  var C = R.coverage || {};
+  if (C.total !== undefined) {
+    $('kpi-total').textContent = C.total;
+    $('kpi-board').textContent = C.board;
+    $('kpi-live').textContent = C.live;
+    $('kpi-nocap').textContent = C.token_no_mcap;
+    $('kpi-excl').textContent = C.excluded_pre_token;
+  }
+
+  // Fitted model numbers in the "how" section.
+  $('f-b0').textContent = B[0].toFixed(3);
+  $('f-b1').textContent = B[1].toFixed(3);
+  $('f-b2').textContent = B[2].toFixed(3);
+  $('f-b3').textContent = B[3].toFixed(3);
+  $('f-r2').textContent = (V.r2 === undefined ? '—' : V.r2.toFixed(4));
+  $('f-n').textContent = V.n_train === undefined ? '—' : V.n_train;
+
+  // Validation table: 5-fold CV plus the four walk-forward splits.
+  var vrows = [];
+  if (V.cv_fitted_rmse !== undefined) {
+    vrows.push(['5-fold cross-validation (by slug)', V.n_train === undefined ? 128 : V.n_train, V.cv_fitted_rmse, V.cv_baseline_rmse]);
+  }
+  (V.walk_forward || []).forEach(function (w) {
+    vrows.push(['Walk-forward: ' + w.label, w.n_test, w.fitted_rmse, w.baseline_rmse]);
+  });
+  $('valid-rows').innerHTML = vrows.map(function (v) {
+    var win = v[3] - v[2];
+    return '<tr><td>' + esc(v[0]) + '</td><td class="num">' + v[1] + '</td>' +
+      '<td class="num"><b>' + v[2].toFixed(3) + '</b></td><td class="num">' + v[3].toFixed(3) + '</td>' +
+      '<td class="num pos">−' + win.toFixed(3) + '</td></tr>';
+  }).join('');
 
   // Filters
   var cats = [...new Set(rows.map(function (r) { return r.category || '(no category)'; }))].sort();
@@ -84,8 +120,10 @@
     var box = $('detail');
     if (!r) { box.hidden = true; box.innerHTML = ''; return; }
     var m = r.model;
-    var math = usd(r.tvl_usd) + ' × ' + m.base_multiple.toFixed(3) + ' × ' + m.growth_multiplier.toFixed(3) +
-      ' × ' + m.maturity_multiplier.toFixed(3) + ' × ' + m.chain_multiplier.toFixed(2) + ' = ' + usd(r.implied_value_usd);
+    var b = m.coefficients;
+    var math = 'ln(mcap) = ' + b[0].toFixed(3) + ' + ' + b[1].toFixed(3) + ' × ln(' + usd(r.tvl_usd) + ') + ' +
+      b[2].toFixed(3) + ' × ' + m.growth.toFixed(1) + ' + ' + b[3].toFixed(3) + ' × ' + m.age_years.toFixed(2) +
+      ' = ' + m.predicted_log_mcap.toFixed(3) + '  →  exp = ' + usd(r.implied_value_usd);
     box.innerHTML = '<button class="close" id="close-detail" type="button">Close</button>' +
       '<h2>' + esc(r.name) + ' <span class="pill">rank #' + r.rank + '</span></h2>' +
       '<p>' + esc(r.category || 'Uncategorised') + ' · ' + r.chains.map(esc).join(', ') +
@@ -93,12 +131,15 @@
       ' · listed ' + (r.listed_at || 'unknown') + ' · records no token</p>' +
       '<div class="kv">' +
       '<div><b>' + usd(r.implied_value_usd) + '</b><span>implied value</span></div>' +
-      '<div><b>' + m.base_multiple.toFixed(3) + '×</b><span>category multiple (median live-token mcap/TVL)</span></div>' +
-      '<div><b>' + m.growth_multiplier.toFixed(3) + '×</b><span>growth, 7d ' + (m.growth_pct > 0 ? '+' : '') + m.growth_pct.toFixed(1) + '%</span></div>' +
-      '<div><b>' + m.maturity_multiplier.toFixed(3) + '×</b><span>maturity, ' + (m.age_days === null ? 'age unknown (365d assumed)' : age(m.age_days) + ' old') + '</span></div>' +
-      '<div><b>' + m.chain_multiplier.toFixed(2) + '×</b><span>chains, ' + r.chains.length + '</span></div>' +
+      '<div><b>' + m.log_tvl.toFixed(2) + '</b><span>ln(TVL), TVL ' + usd(r.tvl_usd) + '</span></div>' +
+      '<div><b>' + coef(m.growth) + '%</b><span>growth, 7d change clamped −50…+100</span></div>' +
+      '<div><b>' + m.age_years.toFixed(2) + 'y</b><span>age, ' + (m.age_years === 1 && r.listed_at === null ? 'unknown (1y assumed)' : age(r.age_days) + ' old') + '</span></div>' +
+      '<div><b>' + m.predicted_log_mcap.toFixed(3) + '</b><span>predicted ln(market cap)</span></div>' +
       '</div>' +
       '<p class="math">' + esc(math) + '</p>' +
+      '<p class="note">Coefficients fitted at build time on ' + (V.n_train || 128) + ' live tokens ' +
+      '(R² ' + (V.r2 === undefined ? '—' : V.r2.toFixed(4)) + '): intercept ' + B[0].toFixed(3) +
+      ', ln(TVL) ' + B[1].toFixed(3) + ', growth ' + B[2].toFixed(3) + ', age ' + B[3].toFixed(3) + '.</p>' +
       '<h3>How to farm it</h3><ol>' + r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol>';
     box.hidden = false;
     document.body.classList.add('detail-mode');
@@ -126,11 +167,8 @@
     document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('active', t.getAttribute('data-tab') === name); });
     ['board', 'live', 'model'].forEach(function (n) { $('tab-' + n).hidden = n !== name; });
   }
-  document.querySelectorAll('[data-tab].linklike').forEach(function (b) {
-    b.addEventListener('click', function () { showTab(b.getAttribute('data-tab')); });
-  });
 
-  // Live comparables + category multiples
+  // Live comparables (all 144) + baseline category multiples.
   $('live-rows').innerHTML = R.live.map(function (p) {
     return '<tr><td><b>' + esc(p.name) + '</b><br><span class="pill">' + esc(p.slug) + '</span></td>' +
       '<td>' + esc(p.category || '—') + '</td><td class="num">' + usd(p.tvl_usd) + '</td>' +
@@ -140,27 +178,33 @@
     return '<tr><td>' + esc(m.category) + '</td><td class="num">' + m.n + '</td><td class="num">' + m.multiple.toFixed(3) + '×</td></tr>';
   }).join('') + '<tr><td><i>All categories (fallback)</i></td><td class="num">—</td><td class="num">' + R.overall_multiple.toFixed(3) + '×</td></tr>';
 
-  // Model sandbox: re-rank from the same raw figures with adjusted constants.
+  // Model sandbox: re-rank from the same per-row features with adjusted coefficients.
+  $('d-b0').textContent = B[0].toFixed(3);
+  $('d-b1').textContent = B[1].toFixed(3);
+  $('d-b2').textContent = B[2].toFixed(3);
+  $('d-b3').textContent = B[3].toFixed(3);
+  $('s-b1').value = B[1].toFixed(3);
+  $('s-b2').value = B[2].toFixed(3);
+  $('s-b3').value = B[3].toFixed(3);
   function sandbox() {
-    var gw = +$('s-growth').value, mf = +$('s-mat').value, ms = +$('s-mult').value;
-    $('v-growth').textContent = gw.toFixed(2);
-    $('v-mat').textContent = mf.toFixed(2);
-    $('v-mult').textContent = ms.toFixed(2);
+    var b1 = +$('s-b1').value, b2 = +$('s-b2').value, b3 = +$('s-b3').value, shift = +$('s-b0').value;
+    $('v-b1').textContent = b1.toFixed(3);
+    $('v-b2').textContent = coef(b2);
+    $('v-b3').textContent = coef(b3);
+    $('v-b0').textContent = coef(shift);
     var scored = rows.map(function (r) {
       var m = r.model;
-      var growth = 1 + (m.growth_pct / 100) * gw;
-      var age = m.age_days === null ? 365 : m.age_days;
-      var mat = mf + (Math.min(age, 1095) / 1095) * (1 - mf);
-      var implied = Math.max(1, Math.round(r.tvl_usd * m.base_multiple * ms * growth * mat * m.chain_multiplier));
+      var implied = Math.max(1, Math.round(Math.exp(B[0] + shift + b1 * m.log_tvl + b2 * m.growth + b3 * m.age_years)));
       return { name: r.name, implied: implied };
     }).sort(function (a, b) { return b.implied - a.implied; }).slice(0, 5);
     $('sandbox-top').innerHTML = scored.map(function (s, i) {
       return '<li>#' + (i + 1) + ' <b>' + esc(s.name) + '</b> — ' + usd(s.implied) + '</li>';
     }).join('');
   }
-  ['s-growth', 's-mat', 's-mult'].forEach(function (id) { $(id).addEventListener('input', sandbox); });
+  ['s-b1', 's-b2', 's-b3', 's-b0'].forEach(function (id) { $(id).addEventListener('input', sandbox); });
   $('reset-model').addEventListener('click', function () {
-    $('s-growth').value = '0.5'; $('s-mat').value = '0.6'; $('s-mult').value = '1'; sandbox();
+    $('s-b1').value = B[1].toFixed(3); $('s-b2').value = B[2].toFixed(3);
+    $('s-b3').value = B[3].toFixed(3); $('s-b0').value = '0'; sandbox();
   });
 
   // Deep links: #detail=<slug> opens a detail view; #cat=<category> filters it.

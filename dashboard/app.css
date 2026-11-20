@@ -95,7 +95,7 @@ tbody tr:hover { background: var(--card2); }
 }
 .watch { color: var(--amber); font-size: 11px; margin-left: 6px; }
 .hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
-body.detail-mode .how, body.detail-mode .controls, body.detail-mode .table-wrap { display: none; }
+body.detail-mode .how, body.detail-mode #tab-board .controls, body.detail-mode #tab-board .table-wrap { display: none; }
 .detail h2 { margin-bottom: 4px; }
 .detail .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 12px 0; }
 .detail .kv div { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
@@ -112,6 +112,11 @@ body.detail-mode .how, body.detail-mode .controls, body.detail-mode .table-wrap 
 .top5 li { margin: 6px 0; }
 .note { color: var(--muted); font-size: 13px; }
 footer { max-width: 1180px; margin: 0 auto; padding: 0 24px 28px; color: var(--muted); font-size: 13px; }
+.kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.kpi-box { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.kpi-box b { display: block; font-size: 24px; color: var(--accent); font-variant-numeric: tabular-nums; }
+.kpi-box span { font-size: 12px; color: var(--muted); }
+.valid table td:first-child { white-space: normal; }
 @media (max-width: 700px) {
   .top, main, footer { padding-left: 14px; padding-right: 14px; }
   .formula { white-space: normal; }

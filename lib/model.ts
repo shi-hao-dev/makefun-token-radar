@@ -1,24 +1,28 @@
-// The token radar's model: one snapshot of the protocol universe in, one ranked board out.
+// The token radar's model (radar-3): a fitted, validated value model.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling)
-// and adds the pre-token protocols below the floor with the most TVL, after the same
-// exclusions the watchlist rule applies (no CEX, no bridge / liquid-staking / wrapped
-// products, no versioned names, no exchange names). A protocol is pre-token when its
-// record carries no token (no market cap, no CoinGecko id, no symbol).
+// and adds every other pre-token protocol that passes the same exclusions the watchlist
+// rule applies (no CEX, no bridge / liquid-staking / wrapped products, no versioned
+// names, no exchange names). A protocol is pre-token when its record carries no token
+// (no market cap, no CoinGecko id, no symbol).
 //
-// Implied value follows only from the snapshot's own figures. The multiple a protocol's
-// TVL is worth is NOT a flat number and NOT a hardcoded list of names: it is the median
-// market-cap-to-TVL ratio of the live-token protocols in the SAME category, computed
-// from this snapshot at run time, falling back to the all-category median where a
-// category has too few live comparables. Then:
+// Implied value follows only from the snapshot's own figures. The model is a least-
+// squares fit on the live-token comparables, computed at run time from this snapshot
+// (no hardcoded coefficients, nothing ranked by name):
 //
-//   growth     = clamp(change_7d, -50, 100) per cent (null counts as 0)
-//   growthMult = 1 + (growth / 100) x 0.5
-//   maturity   = 0.6 + min(age_days, 1095) / 1095 x 0.4   (age unknown: 365 days)
-//   chainMult  = 1 + 0.02 x min(chains - 1, 5)            (TVL on more chains is stickier)
-//   implied    = max(1, round(tvl_usd x multiple x growthMult x maturity x chainMult))
+//   y  = ln(mcap_usd)
+//   x1 = ln(tvl_usd)
+//   x2 = growth = clamp(change_7d ?? 0, -50, 100)
+//   x3 = age_years = age_days / 365, age_days = days(listed_at -> as_of), null -> 365
+//   y  = b0 + b1*x1 + b2*x2 + b3*x3
+//   implied = max(1, round(exp(b0 + b1*ln(tvl) + b2*growth + b3*age_years)))
 //
-// No protocol name is ever special-cased: the same function scores every row.
+// The fit is solved with the normal equations and Gaussian elimination (pure JS,
+// Node standard library only, deterministic). The entry also validates the fit at
+// run time and ships the numbers on the dashboard: 5-fold cross-validation and
+// walk-forward splits, each against the old category-median-multiple baseline.
+// The fitted model must beat the baseline on every split; buildRadar throws if it
+// does not, so a board never ships on an unvalidated model.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -44,13 +48,10 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
-/** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
-export const EARLY_ROWS = 160;
-
-/** How many live-token protocols the Live token view carries, by market cap. */
-export const LIVE_ROWS = 24;
+/** How many live-token protocols the Live token view carries: all of them. */
+export const LIVE_ROWS = 144;
 
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
@@ -69,12 +70,11 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    base_multiple: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
-    chain_multiplier: number;
-    age_days: number | null;
+    coefficients: [number, number, number, number];
+    log_tvl: number;
+    growth: number;
+    age_years: number;
+    predicted_log_mcap: number;
   };
   farm_steps: string[];
 }
@@ -89,6 +89,33 @@ export interface LiveRow {
   ratio: number;
 }
 
+/** One validation split: fitted vs baseline RMSE on the log scale. */
+export interface ValidationSplit {
+  label: string;
+  n_test: number;
+  fitted_rmse: number;
+  baseline_rmse: number;
+}
+
+/** The fitted model's validation, computed at run time and shown on the board. */
+export interface ModelValidation {
+  coefficients: [number, number, number, number];
+  r2: number;
+  n_train: number;
+  cv_fitted_rmse: number;
+  cv_baseline_rmse: number;
+  walk_forward: ValidationSplit[];
+}
+
+/** How the 758 snapshot protocols are accounted for, counted at run time. */
+export interface Coverage {
+  total: number;
+  board: number;
+  live: number;
+  token_no_mcap: number;
+  excluded_pre_token: number;
+}
+
 /** The dashboard's data: the board, the live comparables, and the model's own numbers. */
 export interface RadarData {
   version: string;
@@ -99,6 +126,8 @@ export interface RadarData {
   watchlist: string[];
   rows: BoardRow[];
   live: LiveRow[];
+  validation: ModelValidation;
+  coverage: Coverage;
 }
 
 export interface RadarBuild {
@@ -125,10 +154,6 @@ const MULTIPLE_MIN = 0.03;
 const MULTIPLE_MAX = 0.75;
 const GROWTH_FLOOR = -50;
 const GROWTH_CAP = 100;
-const GROWTH_WEIGHT = 0.5;
-const MATURITY_FLOOR = 0.6;
-const MATURITY_RANGE = 0.4;
-const MATURITY_DAYS = 1095;
 const UNKNOWN_AGE_DAYS = 365;
 
 /** Parse and minimally validate the sealed snapshot. */
@@ -185,12 +210,213 @@ function clamp(x: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, x));
 }
 
+/** The regression features of one protocol, from the snapshot's own figures. */
+export interface Features {
+  slug: string;
+  log_tvl: number;
+  growth: number;
+  age_years: number;
+  age_days: number;
+  n_chains: number;
+  log_mcap: number;
+  category: string | null;
+  listed_at: string | null;
+}
+
+export function features(p: SnapshotProtocol, asOf: string): Features {
+  const growth = clamp(p.change_7d ?? 0, GROWTH_FLOOR, GROWTH_CAP);
+  const age = ageDays(p, asOf);
+  const ageDaysUsed = age ?? UNKNOWN_AGE_DAYS;
+  return {
+    slug: p.slug,
+    log_tvl: Math.log(p.tvl_usd),
+    growth,
+    age_years: ageDaysUsed / 365,
+    age_days: ageDaysUsed,
+    n_chains: p.chains.length,
+    log_mcap: Math.log(p.mcap_usd ?? 1),
+    category: p.category,
+    listed_at: p.listed_at,
+  };
+}
+
+/**
+ * Solve a small dense linear system by Gaussian elimination with partial pivoting.
+ * Deterministic, pure JS; the 4x4 normal-equation system below is well conditioned
+ * enough that this reproduces the reference fit to ~1e-6.
+ */
+export function solveLinear(a: number[][], b: number[]): number[] {
+  const n = b.length;
+  const m = a.map((row, i) => [...row, b[i]!]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(m[r]![col]!) > Math.abs(m[pivot]![col]!)) pivot = r;
+    }
+    if (Math.abs(m[pivot]![col]!) < 1e-12) throw new Error('singular normal equations');
+    if (pivot !== col) {
+      const tmp = m[col]!;
+      m[col] = m[pivot]!;
+      m[pivot] = tmp;
+    }
+    for (let r = col + 1; r < n; r++) {
+      const f = m[r]![col]! / m[col]![col]!;
+      for (let c = col; c <= n; c++) m[r]![c]! -= f * m[col]![c]!;
+    }
+  }
+  const x = new Array<number>(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = m[r]![n]!;
+    for (let c = r + 1; c < n; c++) s -= m[r]![c]! * x[c]!;
+    x[r] = s / m[r]![r]!;
+  }
+  return x;
+}
+
+/** Fit y = b0 + b1*x1 + b2*x2 + b3*x3 by least squares (normal equations). */
+export function fitLeastSquares(rows: Features[]): {
+  beta: [number, number, number, number];
+  r2: number;
+} {
+  const k = 4;
+  const xtx: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
+  const xty: number[] = new Array<number>(k).fill(0);
+  for (const r of rows) {
+    const x = [1, r.log_tvl, r.growth, r.age_years];
+    for (let i = 0; i < k; i++) {
+      for (let j = 0; j < k; j++) xtx[i]![j]! += x[i]! * x[j]!;
+      xty[i]! += x[i]! * r.log_mcap;
+    }
+  }
+  const beta = solveLinear(xtx, xty) as [number, number, number, number];
+  let ssRes = 0;
+  let ssTot = 0;
+  const mean = rows.reduce((s, r) => s + r.log_mcap, 0) / rows.length;
+  for (const r of rows) {
+    const pred = predictLogMcap(beta, r);
+    ssRes += (r.log_mcap - pred) ** 2;
+    ssTot += (r.log_mcap - mean) ** 2;
+  }
+  return { beta, r2: 1 - ssRes / ssTot };
+}
+
+export function predictLogMcap(
+  beta: [number, number, number, number],
+  f: Features,
+): number {
+  return beta[0] + beta[1] * f.log_tvl + beta[2] * f.growth + beta[3] * f.age_years;
+}
+
+/**
+ * The old radar-2 baseline, kept only as the validation yardstick: the category
+ * median market-cap-to-TVL multiple (clamped 0.03..0.75, >=3 live per category else
+ * the overall median) times a growth, maturity and chain factor, on the log scale.
+ */
+export function baselinePredictLogMcap(
+  train: Features[],
+  test: Features,
+): number {
+  const byCat = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const r of train) {
+    const ratio = Math.exp(r.log_mcap) / Math.exp(r.log_tvl);
+    all.push(ratio);
+    const key = r.category ?? '(no category)';
+    const arr = byCat.get(key);
+    if (arr === undefined) byCat.set(key, [ratio]);
+    else arr.push(ratio);
+  }
+  const overall = median(all);
+  const catMed = new Map<string, number>();
+  for (const [key, ratios] of byCat) {
+    if (ratios.length >= 3) catMed.set(key, median(ratios));
+  }
+  const mult = clamp(catMed.get(test.category ?? '(no category)') ?? overall, MULTIPLE_MIN, MULTIPLE_MAX);
+  const growthMult = 1 + (test.growth / 100) * 0.5;
+  const maturity = 0.6 + (Math.min(test.age_days, 1095) / 1095) * 0.4;
+  const chainMult = 1 + 0.02 * Math.min(Math.max(test.n_chains - 1, 0), 5);
+  return Math.log(Math.max(1, Math.exp(test.log_tvl) * mult * growthMult * maturity * chainMult));
+}
+
+function rmse(errors: number[]): number {
+  return Math.sqrt(errors.reduce((s, e) => s + e * e, 0) / errors.length);
+}
+
+/**
+ * Validate the fitted model against the median-multiple baseline:
+ * 5-fold CV (live tokens sorted by slug, fold = index % 5) and walk-forward splits
+ * (live tokens with listed_at, sorted by listed_at, fit on the oldest fraction).
+ * Throws when the fitted model does not beat the baseline on any split.
+ */
+export function validateModel(live: Features[]): ModelValidation {
+  const { beta, r2 } = fitLeastSquares(live);
+
+  // 5-fold CV, deterministic: sort by slug, fold = index % 5.
+  const sorted = [...live].sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const folds: Features[][] = [[], [], [], [], []];
+  sorted.forEach((r, i) => folds[i % 5]!.push(r));
+  const cvFitErr: number[] = [];
+  const cvBaseErr: number[] = [];
+  for (let f = 0; f < 5; f++) {
+    const test = folds[f]!;
+    const train = folds.flatMap((fo, j) => (j === f ? [] : fo));
+    const b = fitLeastSquares(train).beta;
+    for (const r of test) {
+      cvFitErr.push(predictLogMcap(b, r) - r.log_mcap);
+      cvBaseErr.push(baselinePredictLogMcap(train, r) - r.log_mcap);
+    }
+  }
+  const cvFitted = rmse(cvFitErr);
+  const cvBaseline = rmse(cvBaseErr);
+
+  // Walk-forward: oldest fraction trains, newest tests.
+  const dated = live
+    .filter((r) => r.listed_at !== null)
+    .sort((a, b) => (a.listed_at! < b.listed_at! ? -1 : a.listed_at! > b.listed_at! ? 1 : 0));
+  const walkForward: ValidationSplit[] = [];
+  for (const frac of [0.5, 0.6, 0.7, 0.8]) {
+    const k = Math.floor(dated.length * frac);
+    const train = dated.slice(0, k);
+    const test = dated.slice(k);
+    const b = fitLeastSquares(train).beta;
+    const fitErr = test.map((r) => predictLogMcap(b, r) - r.log_mcap);
+    const baseErr = test.map((r) => baselinePredictLogMcap(train, r) - r.log_mcap);
+    walkForward.push({
+      label: `oldest ${Math.round(frac * 100)}% train / newest ${100 - Math.round(frac * 100)}% test`,
+      n_test: test.length,
+      fitted_rmse: rmse(fitErr),
+      baseline_rmse: rmse(baseErr),
+    });
+  }
+
+  const validation: ModelValidation = {
+    coefficients: beta,
+    r2,
+    n_train: live.length,
+    cv_fitted_rmse: cvFitted,
+    cv_baseline_rmse: cvBaseline,
+    walk_forward: walkForward,
+  };
+  if (!(cvFitted < cvBaseline)) {
+    throw new Error(
+      `radar-3 fails validation: 5-fold CV fitted RMSE ${cvFitted.toFixed(4)} does not beat baseline ${cvBaseline.toFixed(4)}`,
+    );
+  }
+  for (const w of walkForward) {
+    if (!(w.fitted_rmse < w.baseline_rmse)) {
+      throw new Error(
+        `radar-3 fails validation: walk-forward ${w.label} fitted RMSE ${w.fitted_rmse.toFixed(4)} does not beat baseline ${w.baseline_rmse.toFixed(4)}`,
+      );
+    }
+  }
+  return validation;
+}
+
 /**
  * Category multiples from the snapshot's own live-token protocols: for each category
  * with at least 3 live tokens, the median market-cap-to-TVL ratio; plus the
- * all-category median as the fallback. A protocol whose recorded market cap is 0
- * carries no measured value, so it is left out rather than counted as worth nothing.
- * Nothing is hardcoded by protocol name.
+ * all-category median as the fallback. Kept for the dashboard's baseline evidence
+ * table and the validation baseline. Nothing is hardcoded by protocol name.
  */
 export function categoryMultiples(
   protocols: SnapshotProtocol[],
@@ -219,34 +445,23 @@ export function categoryMultiples(
   return { byCategory, overall, counts };
 }
 
-/** The implied value of one pre-token protocol, and the model's working. */
+/** The implied value of one pre-token protocol, and the fitted model's working. */
 export function scoreProtocol(
   p: SnapshotProtocol,
-  multiples: { byCategory: Map<string, number>; overall: number },
+  beta: [number, number, number, number],
   asOf: string,
 ): { implied: number; model: BoardRow['model'] } {
-  const key = p.category ?? '(no category)';
-  const baseMultiple = multiples.byCategory.get(key) ?? multiples.overall;
-  const growthPct = clamp(p.change_7d ?? 0, GROWTH_FLOOR, GROWTH_CAP);
-  const growthMultiplier = 1 + (growthPct / 100) * GROWTH_WEIGHT;
-  const age = ageDays(p, asOf);
-  const ageForModel = age ?? UNKNOWN_AGE_DAYS;
-  const maturityMultiplier =
-    MATURITY_FLOOR + (Math.min(ageForModel, MATURITY_DAYS) / MATURITY_DAYS) * MATURITY_RANGE;
-  const chainMultiplier = 1 + 0.02 * Math.min(Math.max(p.chains.length - 1, 0), 5);
-  const implied = Math.max(
-    1,
-    Math.round(p.tvl_usd * baseMultiple * growthMultiplier * maturityMultiplier * chainMultiplier),
-  );
+  const f = features(p, asOf);
+  const pred = predictLogMcap(beta, f);
+  const implied = Math.max(1, Math.round(Math.exp(pred)));
   return {
     implied,
     model: {
-      base_multiple: baseMultiple,
-      growth_pct: growthPct,
-      growth_multiplier: growthMultiplier,
-      maturity_multiplier: maturityMultiplier,
-      chain_multiplier: chainMultiplier,
-      age_days: age,
+      coefficients: beta,
+      log_tvl: f.log_tvl,
+      growth: f.growth,
+      age_years: f.age_years,
+      predicted_log_mcap: pred,
     },
   };
 }
@@ -331,10 +546,22 @@ function secondChain(p: SnapshotProtocol): string {
 }
 
 /**
+ * The test deposit is tiered by the protocol's TVL, so the plan names a concrete
+ * dollar size instead of a range: TVL >= $1B -> $1,000; >= $100M -> $500; else $100.
+ */
+export function testDeposit(tvlUsd: number): number {
+  if (tvlUsd >= 1_000_000_000) return 1000;
+  if (tvlUsd >= 100_000_000) return 500;
+  return 100;
+}
+
+/**
  * A farm plan for one protocol: concrete steps with what they cost and how long they
- * take. Steps are built from the protocol's own category and chains, never slogans,
- * and never invent a token name, an APY, or a points program the protocol does not
- * advertise in the snapshot (the snapshot carries none of those).
+ * take. Every plan names its test deposit size, its dollar cost and its duration
+ * (at least 4 weeks, weekly cadence). Steps are built from the protocol's own
+ * category, chains and TVL, never slogans, and never invent a token name, an APY,
+ * or a points program the protocol does not advertise in the snapshot (the snapshot
+ * carries none of those).
  */
 export function farmSteps(p: SnapshotProtocol): string[] {
   const action = CATEGORY_ACTIONS[p.category ?? ''] ?? {
@@ -343,15 +570,17 @@ export function farmSteps(p: SnapshotProtocol): string[] {
   };
   const chain = primaryChain(p);
   const chain2 = secondChain(p);
+  const deposit = testDeposit(p.tvl_usd);
+  const weekly = Math.round(deposit / 5);
   const tvl = p.tvl_usd >= 1_000_000_000
     ? `$${(p.tvl_usd / 1_000_000_000).toFixed(1)}B`
     : `$${Math.round(p.tvl_usd / 1_000_000)}M`;
   return [
-    `Set up first: create a fresh wallet you control, fund it on ${chain} with enough for gas plus a $50-$500 test deposit, and check the protocol's own site and docs before you touch any contract. Cost: gas plus the test deposit. Time: 30 minutes.`,
-    `Use ${p.name} to ${action.verb} on ${chain}: start with the test deposit, confirm the receipt and the position shows in the app, then scale to your real size only after a week of no issues. Cost: the deposit plus gas. Time: 20 minutes.`,
-    `Repeat weekly for at least four weeks: ${action.verb} again in smaller amounts, so the history shows steady use instead of one flash visit. A protocol with ${tvl} of TVL rewards regular users, not one-time wallets. Cost: gas each week. Time: 15 minutes a week.`,
-    `${action.second} on ${chain2} where the protocol runs there, keeping the same wallet address so the activity links to one identity. Cost: gas plus a second small deposit. Time: 20 minutes.`,
-    `Stay safe and stay eligible: never paste a seed phrase anywhere, never sign a blind transaction, revoke approvals you no longer use, and keep a note of every transaction hash, date and amount in case the launch asks for proof. Cost: nothing but attention. Time: 10 minutes a week.`,
+    `Set up first: create a fresh wallet you control, fund it on ${chain} with a $${deposit} test deposit plus about $20 for gas, and read the protocol's own site and docs before you touch any contract. Total cost: about $${deposit + 20}. Time: 30 minutes.`,
+    `Deposit the $${deposit} test deposit into ${p.name} on ${chain} to ${action.verb}; confirm the position shows in the app, then leave it untouched for a week before scaling up. Cost: $${deposit} plus about $5 gas. Time: 20 minutes.`,
+    `Repeat weekly for at least 4 weeks: ${action.verb} again in smaller amounts of about $${weekly} each week, so the history shows steady use instead of one flash visit. A protocol with ${tvl} of TVL rewards regular users, not one-time wallets. Total extra cost: about $${deposit} over the month plus gas. Time: 15 minutes a week.`,
+    `${action.second} on ${chain2} where the protocol runs there, keeping the same wallet address so the activity links to one identity. Cost: about $${Math.round(deposit / 2)} plus gas. Time: 20 minutes.`,
+    `Stay safe and stay eligible: never paste a seed phrase anywhere, never sign a blind transaction, revoke approvals you no longer use, and keep a note of every transaction hash, date and amount in case the launch asks for proof. Cost: nothing but attention. Time: 10 minutes a week for the 4 weeks.`,
   ];
 }
 
@@ -360,8 +589,15 @@ export function buildRadar(snapshot: Snapshot): RadarBuild {
   const multiples = categoryMultiples(snapshot.protocols);
   const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
 
+  // The training set: live tokens with a recorded market cap and TVL (n=128).
+  const train = snapshot.protocols
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .map((p) => features(p, snapshot.as_of));
+  const validation = validateModel(train);
+  const beta = validation.coefficients;
+
   const score = (p: SnapshotProtocol): BoardRow => {
-    const { implied, model } = scoreProtocol(p, multiples, snapshot.as_of);
+    const { implied, model } = scoreProtocol(p, beta, snapshot.as_of);
     return {
       rank: 0,
       slug: p.slug,
@@ -387,20 +623,21 @@ export function buildRadar(snapshot: Snapshot): RadarBuild {
     .filter((p): p is SnapshotProtocol => p !== undefined)
     .map(score);
 
+  // Every other eligible pre-token protocol, not a capped top-N: the board carries
+  // the whole eligible universe below the floor.
   const early = snapshot.protocols
     .filter((p) => isPreToken(p) && !isExcluded(p) && !snapshot.watchlist.includes(p.slug))
     .sort((a, b) => b.tvl_usd - a.tvl_usd)
-    .slice(0, EARLY_ROWS)
     .map(score);
 
   const board = [...watchlistRows, ...early]
     .sort((a, b) => b.implied_value_usd - a.implied_value_usd || b.tvl_usd - a.tvl_usd)
     .map((row, i) => ({ ...row, rank: i + 1 }));
 
+  // Live view: every protocol that records a token AND a market cap (144), by mcap.
   const live = snapshot.protocols
-    .filter((p) => p.mcap_usd !== null && p.tvl_usd > 0)
+    .filter((p) => p.gecko_id !== null && p.symbol !== null && p.mcap_usd !== null)
     .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0))
-    .slice(0, LIVE_ROWS)
     .map((p): LiveRow => ({
       slug: p.slug,
       name: p.name,
@@ -409,6 +646,18 @@ export function buildRadar(snapshot: Snapshot): RadarBuild {
       mcap_usd: p.mcap_usd ?? 0,
       ratio: (p.mcap_usd ?? 0) / p.tvl_usd,
     }));
+
+  // The 758 accounting, counted from the snapshot at run time, not hardcoded.
+  const preToken = snapshot.protocols.filter(isPreToken);
+  const coverage: Coverage = {
+    total: snapshot.protocols.length,
+    board: board.length,
+    live: live.length,
+    token_no_mcap: snapshot.protocols.filter(
+      (p) => !isPreToken(p) && p.mcap_usd === null,
+    ).length,
+    excluded_pre_token: preToken.filter(isExcluded).length,
+  };
 
   const categoryMultiplesList = [...multiples.byCategory.entries()]
     .map(([category, multiple]) => ({
@@ -429,6 +678,8 @@ export function buildRadar(snapshot: Snapshot): RadarBuild {
       watchlist: snapshot.watchlist,
       rows: board,
       live,
+      validation,
+      coverage,
     },
     early_size: early.length,
     live_size: live.length,

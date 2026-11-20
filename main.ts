@@ -100,5 +100,7 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${early_size} early, ${live_size} live set aside)\n` +
+    `token radar: radar-3 fit on ${radar.validation.n_train} live tokens, beta=[${radar.validation.coefficients.map((b) => b.toFixed(4)).join(', ')}], R2=${radar.validation.r2.toFixed(4)}\n` +
+    `token radar: 5-fold CV fitted RMSE ${radar.validation.cv_fitted_rmse.toFixed(4)} vs baseline ${radar.validation.cv_baseline_rmse.toFixed(4)}; walk-forward fitted ${radar.validation.walk_forward.map((w) => w.fitted_rmse.toFixed(3)).join('/')} vs baseline ${radar.validation.walk_forward.map((w) => w.baseline_rmse.toFixed(3)).join('/')}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
